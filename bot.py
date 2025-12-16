@@ -1,9 +1,14 @@
 import os
 import random
 import argparse
+import sys
 from datetime import datetime, timezone
+import time
 import tweepy
 import google.generativeai as genai
+import io
+import requests
+import base64
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -28,31 +33,35 @@ missing_vars = [var for var in REQUIRED_VARS if not os.getenv(var)]
 if missing_vars:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
+
+def retry_api_call(func, max_retries=3, delay=2):
+    """Retry wrapper for API calls."""
+    for attempt in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            print(f"Attempt {attempt + 1} failed: {e}. Retrying in {delay}s...")
+            time.sleep(delay)
+            delay *= 2
+
+
 def get_active_campaign(supabase: Client, campaign_name: str = None):
-    """Fetch the active campaign from the database.
-    
-    If campaign_name is provided, it fetches that specific active campaign.
-    Otherwise, it fetches the first active campaign found.
-    """
+    """Fetch the active campaign from the database."""
     try:
         query = supabase.table("campaigns").select("*").eq("active", True)
-        
         if campaign_name:
             query = query.eq("name", campaign_name)
-            
         response = query.limit(1).execute()
-        if response.data:
-            return response.data[0]
-        return None
+        return response.data[0] if response.data else None
     except Exception as e:
         print(f"Error fetching campaign: {e}")
         return None
 
+
 def generate_content(supabase: Client, campaign_data=None, campaign_description: str = None):
-    """Generate tweet text and image prompt using Gemini.
-    
-    Can generate content from a Supabase campaign object or a free-form description.
-    """
+    """Generate tweet text and image prompt using Gemini."""
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
@@ -66,11 +75,9 @@ def generate_content(supabase: Client, campaign_data=None, campaign_description:
         topic = random.choice(topic_list)
         system_prompt = campaign_data.get('system_prompt', system_prompt)
     elif campaign_description:
-        # For ad-hoc campaigns, the description itself becomes the primary goal/topic
         system_prompt = f"You are a social media manager. Your goal is to create engaging content about: {campaign_description}"
-        topic = campaign_description # Use the description as the topic for consistency
+        topic = campaign_description
     else:
-        # Fallback if neither is provided
         system_prompt = "You are a social media manager. Write a professional tweet about a general topic."
 
     prompt = f"""
@@ -84,31 +91,34 @@ def generate_content(supabase: Client, campaign_data=None, campaign_description:
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = retry_api_call(lambda: model.generate_content(prompt))
         text_lines = [line.strip() for line in response.text.strip().split('\n') if line.strip()]
         
-        tweet_text = ""
-        image_prompt = ""
-
-        if len(text_lines) >= 1:
-            tweet_text = text_lines[0].replace("Tweet:", "").strip()
-        if len(text_lines) >= 2:
-            image_prompt = text_lines[1].replace("Image Prompt:", "").strip()
+        tweet_text = text_lines[0].replace("Tweet:", "").strip() if len(text_lines) >= 1 else ""
+        image_prompt = text_lines[1].replace("Image Prompt:", "").strip() if len(text_lines) >= 2 else ""
         
-        # Fallback if parsing fails or returns empty
         if not tweet_text:
             tweet_text = "Check out our latest updates! #tech"
         if not image_prompt:
             image_prompt = "A modern tech background with abstract nodes."
             
-        # Hard truncate to 280 characters to satisfy X API limits
         if len(tweet_text) > 280:
             tweet_text = tweet_text[:277] + "..."
+        
+        # Log generated content to Supabase
+        try:
+            supabase.table("logs").insert({
+                "message": f"Generated content - Topic: {topic}",
+                "level": "INFO"
+            }).execute()
+        except Exception as log_err:
+            print(f"Failed to log content generation: {log_err}")
             
         return tweet_text, image_prompt
     except Exception as e:
         print(f"Error generating content: {e}")
         raise e
+
 
 def run_bot(dry_run=False, campaign_name: str = None):
     """Main execution flow."""
@@ -117,33 +127,63 @@ def run_bot(dry_run=False, campaign_name: str = None):
     try:
         print("Starting bot run...")
         
-        campaign = None
-        if campaign_name:
-            campaign = get_active_campaign(supabase, campaign_name)
+        campaign = get_active_campaign(supabase, campaign_name) if campaign_name else get_active_campaign(supabase)
 
-        tweet_text = ""
-        image_prompt = ""
         campaign_id_to_log = None
         
         if campaign:
             print(f"Active Campaign: {campaign.get('name')}")
             tweet_text, image_prompt = generate_content(supabase, campaign_data=campaign)
             campaign_id_to_log = campaign.get('id')
+        elif campaign_name:
+            print(f"No active campaign found matching '{campaign_name}'. Generating ad-hoc content.")
+            tweet_text, image_prompt = generate_content(supabase, campaign_description=campaign_name)
         else:
-            if campaign_name: # User provided a description, but it wasn't a stored campaign
-                print(f"No active campaign found matching '{campaign_name}'. Generating ad-hoc content based on description.")
-                tweet_text, image_prompt = generate_content(supabase, campaign_description=campaign_name)
-            else: # No campaign name provided, no active campaign found
-                print("No active campaign found. Generating general content.")
-                tweet_text, image_prompt = generate_content(supabase) # Generate general content
+            print("No active campaign found. Generating general content.")
+            tweet_text, image_prompt = generate_content(supabase)
         
         print(f"Generated Tweet: {tweet_text}")
         print(f"Image Prompt: {image_prompt}")
 
-        # TODO: Implement image generation using an image model (e.g., Imagen)
-        # and attach the media_id to the tweet.
+        # Image Generation
+        image_bytes = None
+        media_id = None
+        
         if image_prompt:
-            print("Notice: Image generation is not yet implemented. This will be a text-only tweet.")
+            print("Attempting to generate image...")
+            try:
+                genai.configure(api_key=GEMINI_API_KEY)
+                image_model_name = "gemini-2.0-flash-exp-image-generation"
+
+                print(f"Using SDK for {image_model_name}...")
+                image_model = genai.GenerativeModel(image_model_name)
+                
+                result = retry_api_call(lambda: image_model.generate_content(image_prompt))
+                
+                if result and result.parts:
+                    for part in result.parts:
+                        if part.inline_data:
+                            image_bytes = part.inline_data.data
+                            break
+                
+                if image_bytes:
+                    print("Image generated successfully.")
+                    if dry_run:
+                        with open("dry_run_image.png", "wb") as f:
+                            f.write(image_bytes)
+                        print("[DRY RUN] Saved generated image to 'dry_run_image.png'")
+                else:
+                    print(f"Model did not return image data. Response: {result.text[:100] if result.text else 'No text'}...")
+
+            except Exception as img_err:
+                print(f"Image generation failed: {img_err}. Proceeding with text only.")
+                try:
+                    supabase.table("logs").insert({
+                        "message": f"Image generation failed: {img_err}",
+                        "level": "WARNING"
+                    }).execute()
+                except:
+                    pass
 
         if dry_run:
             print("[DRY RUN] Skipping posting to X and database logging.")
@@ -157,43 +197,134 @@ def run_bot(dry_run=False, campaign_name: str = None):
             access_token_secret=X_ACCESS_TOKEN_SECRET
         )
 
+        # Upload Media
+        if image_bytes:
+            print("Uploading image to X...")
+            try:
+                auth = tweepy.OAuth1UserHandler(
+                    X_API_KEY, X_API_SECRET,
+                    X_ACCESS_TOKEN, X_ACCESS_TOKEN_SECRET
+                )
+                api = tweepy.API(auth)
+                media = retry_api_call(lambda: api.media_upload(filename="image.png", file=io.BytesIO(image_bytes)))
+                media_id = media.media_id
+                print(f"Image uploaded. Media ID: {media_id}")
+            except Exception as upload_err:
+                print(f"Media upload failed: {upload_err}. Posting text only.")
+
         # Post Tweet
         print("Posting to X...")
-        response = client.create_tweet(text=tweet_text)
-        post_id = response.data['id']
-        print(f"Posted! ID: {post_id}")
-
-        # Log to Supabase
-        post_data = {
-            "campaign_id": campaign_id_to_log, # Use the determined campaign ID or None
-            "content": tweet_text,
-            "x_post_id": post_id,
-            "posted_at": datetime.now(timezone.utc).isoformat()
-        }
-        supabase.table("posts").insert(post_data).execute()
-        print("Logged to database.")
+        try:
+            if media_id:
+                response = retry_api_call(lambda: client.create_tweet(text=tweet_text, media_ids=[media_id]))
+            else:
+                response = retry_api_call(lambda: client.create_tweet(text=tweet_text))
+            
+            post_id = response.data['id']
+            print(f"Posted! ID: {post_id}")
+            
+            # Log to Supabase
+            try:
+                post_data = {
+                    "campaign_id": campaign_id_to_log, 
+                    "content": tweet_text,
+                    "x_post_id": post_id,
+                    "posted_at": datetime.now(timezone.utc).isoformat()
+                }
+                supabase.table("posts").insert(post_data).execute()
+                print("Logged to database.")
+            except Exception as db_err:
+                print(f"Failed to log post to database: {db_err}")
+            
+        except Exception as post_err:
+            print(f"Posting failed: {post_err}")
+            raise post_err
 
     except Exception as e:
         error_msg = f"Bot failed: {str(e)}"
         print(error_msg)
-        # Log error
         try:
-            # Re-initialize client locally to avoid using a potentially broken client instance
             log_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
             log_client.table("logs").insert({"message": error_msg, "level": "ERROR"}).execute()
         except Exception as log_error:
             print(f"Failed to log error to DB: {log_error}")
 
+
+def add_campaign():
+    """Interactive campaign creation."""
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    
+    print("\n=== Add New Campaign ===")
+    name = input("Campaign name: ").strip()
+    if not name:
+        print("Name is required.")
+        return
+    
+    system_prompt = input("System prompt (how should AI behave): ").strip()
+    topics_input = input("Topics (comma-separated): ").strip()
+    topic_list = [t.strip() for t in topics_input.split(",") if t.strip()] or ["General update"]
+    
+    active = input("Activate now? (y/n): ").strip().lower() == 'y'
+    
+    try:
+        supabase.table("campaigns").insert({
+            "name": name,
+            "system_prompt": system_prompt or "Write a professional tweet.",
+            "topic_list": topic_list,
+            "active": active
+        }).execute()
+        print(f"Campaign '{name}' added successfully!")
+    except Exception as e:
+        print(f"Failed to add campaign: {e}")
+
+
+def list_campaigns():
+    """List all campaigns."""
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        response = supabase.table("campaigns").select("id, name, active").execute()
+        if not response.data:
+            print("No campaigns found.")
+            return
+        print("\n=== Campaigns ===")
+        for c in response.data:
+            status = "✓ Active" if c['active'] else "✗ Inactive"
+            print(f"  [{c['id']}] {c['name']} - {status}")
+    except Exception as e:
+        print(f"Failed to list campaigns: {e}")
+
+
+def toggle_campaign(campaign_id: int):
+    """Toggle campaign active status."""
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        current = supabase.table("campaigns").select("active").eq("id", campaign_id).single().execute()
+        new_status = not current.data['active']
+        supabase.table("campaigns").update({"active": new_status}).eq("id", campaign_id).execute()
+        print(f"Campaign {campaign_id} is now {'active' if new_status else 'inactive'}.")
+    except Exception as e:
+        print(f"Failed to toggle campaign: {e}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the X Marketing Bot")
     parser.add_argument("--test", action="store_true", help="Run in dry-run mode (no posting)")
     parser.add_argument("--campaign", type=str, help="Name of the specific campaign to run")
+    parser.add_argument("--add", action="store_true", help="Add a new campaign")
+    parser.add_argument("--list", action="store_true", help="List all campaigns")
+    parser.add_argument("--toggle", type=int, help="Toggle campaign active status by ID")
     args = parser.parse_args()
 
-    campaign_input = args.campaign
-    if not campaign_input:
-        user_input = input("Enter campaign name (or press Enter to run any active campaign): ").strip()
-        if user_input:
-            campaign_input = user_input
-    
-    run_bot(dry_run=args.test, campaign_name=campaign_input)
+    if args.add:
+        add_campaign()
+    elif args.list:
+        list_campaigns()
+    elif args.toggle:
+        toggle_campaign(args.toggle)
+    else:
+        campaign_input = args.campaign
+        if not campaign_input and sys.stdin.isatty():
+            user_input = input("Enter campaign name (or press Enter to run any active campaign): ").strip()
+            if user_input:
+                campaign_input = user_input
+        run_bot(dry_run=args.test, campaign_name=campaign_input)
