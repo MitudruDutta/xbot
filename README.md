@@ -22,7 +22,7 @@ An automated content generation and publishing pipeline for X (Twitter) leveragi
 
 XBot implements an end-to-end automated social media content pipeline consisting of:
 
-1. **Content Generation** — Utilizes Gemini 2.5 Flash for generating contextually relevant tweet text based on campaign-defined system prompts and topic lists.
+1. **Content Generation** — Utilizes Gemini for generating contextually relevant tweet text based on campaign-defined system prompts and topic lists.
 
 2. **Image Synthesis** — Employs Gemini's image generation models to create visual content aligned with the generated tweet.
 
@@ -40,8 +40,8 @@ XBot implements an end-to-end automated social media content pipeline consisting
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                │
 │  ┌──────────┐    ┌──────────────┐    ┌──────────────────────┐   │
-│  │ Supabase │───▶│   Campaign   │───▶│ Content Generation │  │
-│  │    DB    │    │   Selector   │    │  (Gemini 2.5 Flash) │   │
+│  │ Supabase │───▶│   Campaign   │───▶│ Content Generation│   │
+│  │    DB    │    │   Selector   │    │       (Gemini)          │
 │  └──────────┘    └──────────────┘    └──────────┬───────────┘   │
 │       │                                         │              │
 │       │                                         ▼              │
@@ -107,12 +107,12 @@ cp .env.example .env
 | Variable | Description | Source |
 |----------|-------------|--------|
 | `X_API_KEY` | X API consumer key | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
-| `X_API_SECRET` | X API consumer secret | X Developer Portal |
-| `X_ACCESS_TOKEN` | User access token | X Developer Portal |
-| `X_ACCESS_TOKEN_SECRET` | User access token secret | X Developer Portal |
+| `X_API_SECRET` | X API consumer secret | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
+| `X_ACCESS_TOKEN` | User access token | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
+| `X_ACCESS_TOKEN_SECRET` | User access token secret | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
 | `GEMINI_API_KEY` | Google Gemini API key | [Google AI Studio](https://aistudio.google.com/apikey) |
-| `SUPABASE_URL` | Supabase project URL | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → API |
-| `SUPABASE_KEY` | Supabase anon/public key | Supabase Dashboard → Project Settings → API |
+| `SUPABASE_URL` | Supabase project URL | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → Data API |
+| `SUPABASE_KEY` | Supabase anon/public key | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → API Keys |
 
 ### `.env.example`
 
