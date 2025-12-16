@@ -28,10 +28,19 @@ missing_vars = [var for var in REQUIRED_VARS if not os.getenv(var)]
 if missing_vars:
     raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-def get_active_campaign(supabase: Client):
-    """Fetch the first active campaign from the database."""
+def get_active_campaign(supabase: Client, campaign_name: str = None):
+    """Fetch the active campaign from the database.
+    
+    If campaign_name is provided, it fetches that specific active campaign.
+    Otherwise, it fetches the first active campaign found.
+    """
     try:
-        response = supabase.table("campaigns").select("*").eq("active", True).limit(1).execute()
+        query = supabase.table("campaigns").select("*").eq("active", True)
+        
+        if campaign_name:
+            query = query.eq("name", campaign_name)
+            
+        response = query.limit(1).execute()
         if response.data:
             return response.data[0]
         return None
@@ -39,22 +48,34 @@ def get_active_campaign(supabase: Client):
         print(f"Error fetching campaign: {e}")
         return None
 
-def generate_content(campaign):
-    """Generate tweet text and image prompt using Gemini."""
+def generate_content(supabase: Client, campaign_data=None, campaign_description: str = None):
+    """Generate tweet text and image prompt using Gemini.
+    
+    Can generate content from a Supabase campaign object or a free-form description.
+    """
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-2.5-flash')
     
-    topic_list = campaign.get('topic_list')
-    if not topic_list or not isinstance(topic_list, list):
-        topic_list = ["General update"]
-        
-    topic = random.choice(topic_list)
-    system_prompt = campaign.get('system_prompt', "Write a professional tweet.")
+    topic = "General update"
+    system_prompt = "Write a professional tweet."
     
+    if campaign_data:
+        topic_list = campaign_data.get('topic_list')
+        if not topic_list or not isinstance(topic_list, list):
+            topic_list = ["General update"]
+        topic = random.choice(topic_list)
+        system_prompt = campaign_data.get('system_prompt', system_prompt)
+    elif campaign_description:
+        # For ad-hoc campaigns, the description itself becomes the primary goal/topic
+        system_prompt = f"You are a social media manager. Your goal is to create engaging content about: {campaign_description}"
+        topic = campaign_description # Use the description as the topic for consistency
+    else:
+        # Fallback if neither is provided
+        system_prompt = "You are a social media manager. Write a professional tweet about a general topic."
+
     prompt = f"""
-    You are a social media manager.
+    {system_prompt}
     Topic: {topic}
-    Campaign Goal: {system_prompt}
     
     Output exactly two lines:
     Line 1: The tweet text (under 280 characters).
@@ -89,19 +110,32 @@ def generate_content(campaign):
         print(f"Error generating content: {e}")
         raise e
 
-def run_bot(dry_run=False):
+def run_bot(dry_run=False, campaign_name: str = None):
     """Main execution flow."""
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
     try:
         print("Starting bot run...")
-        campaign = get_active_campaign(supabase)
-        if not campaign:
-            print("No active campaign found.")
-            return
+        
+        campaign = None
+        if campaign_name:
+            campaign = get_active_campaign(supabase, campaign_name)
 
-        print(f"Active Campaign: {campaign.get('name')}")
-        tweet_text, image_prompt = generate_content(campaign)
+        tweet_text = ""
+        image_prompt = ""
+        campaign_id_to_log = None
+        
+        if campaign:
+            print(f"Active Campaign: {campaign.get('name')}")
+            tweet_text, image_prompt = generate_content(supabase, campaign_data=campaign)
+            campaign_id_to_log = campaign.get('id')
+        else:
+            if campaign_name: # User provided a description, but it wasn't a stored campaign
+                print(f"No active campaign found matching '{campaign_name}'. Generating ad-hoc content based on description.")
+                tweet_text, image_prompt = generate_content(supabase, campaign_description=campaign_name)
+            else: # No campaign name provided, no active campaign found
+                print("No active campaign found. Generating general content.")
+                tweet_text, image_prompt = generate_content(supabase) # Generate general content
         
         print(f"Generated Tweet: {tweet_text}")
         print(f"Image Prompt: {image_prompt}")
@@ -131,7 +165,7 @@ def run_bot(dry_run=False):
 
         # Log to Supabase
         post_data = {
-            "campaign_id": campaign.get('id'),
+            "campaign_id": campaign_id_to_log, # Use the determined campaign ID or None
             "content": tweet_text,
             "x_post_id": post_id,
             "posted_at": datetime.now(timezone.utc).isoformat()
@@ -153,6 +187,13 @@ def run_bot(dry_run=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the X Marketing Bot")
     parser.add_argument("--test", action="store_true", help="Run in dry-run mode (no posting)")
+    parser.add_argument("--campaign", type=str, help="Name of the specific campaign to run")
     args = parser.parse_args()
+
+    campaign_input = args.campaign
+    if not campaign_input:
+        user_input = input("Enter campaign name (or press Enter to run any active campaign): ").strip()
+        if user_input:
+            campaign_input = user_input
     
-    run_bot(dry_run=args.test)
+    run_bot(dry_run=args.test, campaign_name=campaign_input)
