@@ -12,6 +12,7 @@ An automated content generation and publishing pipeline for X (Twitter) leveragi
 - [Database Schema](#database-schema)
 - [Usage](#usage)
 - [Campaign Management](#campaign-management)
+- [Mentions Auto-Reply](#mentions-auto-reply)
 - [CI/CD Pipeline](#cicd-pipeline)
 - [API Reference](#api-reference)
 - [Error Handling](#error-handling)
@@ -22,32 +23,34 @@ An automated content generation and publishing pipeline for X (Twitter) leveragi
 
 XBot implements an end-to-end automated social media content pipeline consisting of:
 
-1. **Content Generation** — Utilizes Gemini for generating contextually relevant tweet text based on campaign-defined system prompts and topic lists.
+1. **Content Generation** — Utilizes Gemini 2.5 Flash for generating contextually relevant tweet text based on campaign-defined system prompts and topic lists.
 
 2. **Image Synthesis** — Employs Gemini's image generation models to create visual content aligned with the generated tweet.
 
-3. **Multi-Platform Integration** — Interfaces with X API v2 for tweet publishing and v1.1 for media uploads.
+3. **Mentions Auto-Reply** — Monitors and responds to @mentions using AI-generated contextual replies.
 
-4. **Persistent Storage** — Maintains campaign configurations, post history, and operational logs in Supabase (PostgreSQL).
+4. **Multi-Platform Integration** — Interfaces with X API v2 for tweet publishing and v1.1 for media uploads.
 
-5. **Fault Tolerance** — Implements exponential backoff retry logic for transient API failures.
+5. **Persistent Storage** — Maintains campaign configurations, post history, mentions, and operational logs in Supabase (PostgreSQL).
+
+6. **Fault Tolerance** — Implements exponential backoff retry logic for transient API failures.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        XBot Pipeline                           │
+│                        XBot Pipeline                            │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                │
-│  ┌──────────┐    ┌──────────────┐    ┌──────────────────────┐   │
-│  │ Supabase │───▶│   Campaign   │───▶│ Content Generation│   │
-│  │    DB    │    │   Selector   │    │       (Gemini)          │
-│  └──────────┘    └──────────────┘    └──────────┬───────────┘   │
+│                                                                 │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────────────┐  │
+│  │ Supabase │───▶│   Campaign   │───▶│  Content Generation  │  │
+│  │    DB    │    │   Selector   │    │   (Gemini 2.5 Flash) │  │
+│  └──────────┘    └──────────────┘    └──────────┬───────────┘  │
 │       │                                         │              │
 │       │                                         ▼              │
 │       │                              ┌──────────────────────┐  │
 │       │                              │  Image Generation    │  │
-│       │                              │ (Gemini Image Model) │  │
+│       │                              │  (Gemini Image Model)│  │
 │       │                              └──────────┬───────────┘  │
 │       │                                         │              │
 │       │                                         ▼              │
@@ -58,10 +61,25 @@ XBot implements an end-to-end automated social media content pipeline consisting
 │       │                              └──────────┬───────────┘  │
 │       │                                         │              │
 │       ▼                                         ▼              │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │                    Logging & Analytics                  │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│                                                                │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │                    Logging & Analytics                    │  │
+│  └──────────────────────────────────────────────────────────┘  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│                     Mentions Pipeline                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐  │
+│  │  X API v2    │───▶│   Mention    │───▶│  Reply Generator │  │
+│  │  Mentions    │    │   Filter     │    │  (Gemini 2.5)    │  │
+│  └──────────────┘    └──────────────┘    └────────┬─────────┘  │
+│                             │                      │            │
+│                             ▼                      ▼            │
+│                      ┌──────────────┐    ┌──────────────────┐  │
+│                      │  Supabase    │◀───│   Post Reply     │  │
+│                      │  (mentions)  │    │   (X API v2)     │  │
+│                      └──────────────┘    └──────────────────┘  │
+│                                                                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -70,14 +88,14 @@ XBot implements an end-to-end automated social media content pipeline consisting
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
 | Python | ≥3.10 | Runtime environment |
-| X Developer Account | API v2 | Tweet publishing |
+| X Developer Account | API v2 | Tweet publishing, mentions |
 | Google AI Studio | Gemini API | Content & image generation |
 | Supabase | Any | PostgreSQL database |
 
 ## Installation
 
 ```bash
-git clone https://github.com/MitudruDutta/xbot.git
+git clone https://github.com/yourusername/xbot.git
 cd xbot
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
@@ -107,12 +125,12 @@ cp .env.example .env
 | Variable | Description | Source |
 |----------|-------------|--------|
 | `X_API_KEY` | X API consumer key | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
-| `X_API_SECRET` | X API consumer secret | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
-| `X_ACCESS_TOKEN` | User access token | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
-| `X_ACCESS_TOKEN_SECRET` | User access token secret | [X Developer Portal](https://developer.x.com/en/portal/dashboard) |
+| `X_API_SECRET` | X API consumer secret | X Developer Portal |
+| `X_ACCESS_TOKEN` | User access token | X Developer Portal |
+| `X_ACCESS_TOKEN_SECRET` | User access token secret | X Developer Portal |
 | `GEMINI_API_KEY` | Google Gemini API key | [Google AI Studio](https://aistudio.google.com/apikey) |
-| `SUPABASE_URL` | Supabase project URL | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → Data API |
-| `SUPABASE_KEY` | Supabase anon/public key | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → API Keys |
+| `SUPABASE_URL` | Supabase project URL | [Supabase Dashboard](https://supabase.com/dashboard) → Project Settings → API |
+| `SUPABASE_KEY` | Supabase anon/public key | Supabase Dashboard → Project Settings → API |
 
 ### `.env.example`
 
@@ -155,6 +173,17 @@ CREATE TABLE posts (
     posted_at TIMESTAMPTZ
 );
 
+-- Mentions tracking
+CREATE TABLE mentions (
+    id SERIAL PRIMARY KEY,
+    mention_id TEXT NOT NULL UNIQUE,
+    author_username TEXT,
+    mention_text TEXT,
+    reply_text TEXT,
+    reply_id TEXT,
+    replied_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 -- Operational logs
 CREATE TABLE logs (
     id SERIAL PRIMARY KEY,
@@ -166,6 +195,7 @@ CREATE TABLE logs (
 -- Indexes for query optimization
 CREATE INDEX idx_campaigns_active ON campaigns(active);
 CREATE INDEX idx_posts_campaign_id ON posts(campaign_id);
+CREATE INDEX idx_mentions_mention_id ON mentions(mention_id);
 CREATE INDEX idx_logs_level ON logs(level);
 CREATE INDEX idx_logs_created_at ON logs(created_at DESC);
 ```
@@ -188,6 +218,11 @@ python bot.py --test
 python bot.py --add           # Interactive campaign creation
 python bot.py --list          # List all campaigns
 python bot.py --toggle <id>   # Toggle campaign active state
+
+# Mentions auto-reply
+python bot.py --mentions              # Process mentions
+python bot.py --mentions --limit 10   # Process up to 10 mentions
+python bot.py --mentions --test       # Dry run mentions
 ```
 
 ### CLI Reference
@@ -199,6 +234,8 @@ python bot.py --toggle <id>   # Toggle campaign active state
 | `--add` | `flag` | Launch interactive campaign creator |
 | `--list` | `flag` | Display all campaigns with status |
 | `--toggle` | `integer` | Toggle active state by campaign ID |
+| `--mentions` | `flag` | Process and reply to mentions |
+| `--limit` | `integer` | Max mentions to process (default: 5) |
 
 ## Campaign Management
 
@@ -224,15 +261,52 @@ Campaign 'Blockchain News' added successfully!
 | `topic_list` | `JSONB` | Array of topics for random selection |
 | `active` | `BOOLEAN` | Eligibility for automated execution |
 
+## Mentions Auto-Reply
+
+The mentions feature automatically monitors and responds to @mentions using AI-generated contextual replies.
+
+### How It Works
+
+1. **Fetch Mentions** — Retrieves recent mentions via X API v2
+2. **Filter Processed** — Skips mentions already in the `mentions` table
+3. **Generate Reply** — Uses Gemini to create contextual response based on mention content
+4. **Post Reply** — Sends reply as a threaded response
+5. **Log to Database** — Records mention and reply for tracking
+
+### Example
+
+```
+$ python bot.py --mentions
+
+Starting mentions bot...
+Authenticated as @yourbot (ID: 123456789)
+
+Mention from @user1: What's the latest on Ethereum upgrades?...
+Generated reply: The Pectra upgrade is scheduled for Q1 2025, bringing account abstraction and improved validator operations. Exciting times for ETH!
+Replied! ID: 987654321
+
+Processed 1 mentions.
+```
+
+### Mentions Data Model
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mention_id` | `TEXT` | Original mention tweet ID |
+| `author_username` | `TEXT` | Username who mentioned the bot |
+| `mention_text` | `TEXT` | Content of the mention |
+| `reply_text` | `TEXT` | AI-generated reply |
+| `reply_id` | `TEXT` | Posted reply tweet ID |
+| `replied_at` | `TIMESTAMPTZ` | Timestamp of reply |
+
 ## CI/CD Pipeline
 
-### GitHub Actions Workflow
+### GitHub Actions Workflows
 
-Located at `.github/workflows/daily_post.yml`:
-
-- **Schedule**: Runs at 09:00 and 18:00 UTC daily
-- **Manual Trigger**: Supports `workflow_dispatch` with optional inputs
-- **Timeout**: 5 minutes maximum execution time
+| File | Schedule | Action |
+|------|----------|--------|
+| `.github/workflows/post.yml` | `0 9,18 * * *` | Post content (9 AM & 6 PM UTC) |
+| `.github/workflows/mentions.yml` | `0 */4 * * *` | Check mentions (every 4 hours) |
 
 ### Required Repository Secrets
 
@@ -250,8 +324,11 @@ Configure in: Repository → Settings → Secrets and variables → Actions
 
 ### Manual Workflow Dispatch
 
-The workflow accepts optional inputs:
-- `campaign`: Specific campaign name to execute
+**Post workflow** (`post.yml`):
+- `campaign`: Specific campaign name (optional)
+- `dry_run`: Boolean flag for test mode
+
+**Mentions workflow** (`mentions.yml`):
 - `dry_run`: Boolean flag for test mode
 
 ## API Reference
@@ -262,7 +339,9 @@ The workflow accepts optional inputs:
 |----------|------------|---------|-------------|
 | `get_active_campaign` | `supabase`, `campaign_name?` | `dict \| None` | Fetches active campaign from database |
 | `generate_content` | `supabase`, `campaign_data?`, `campaign_description?` | `tuple[str, str]` | Generates tweet text and image prompt |
-| `run_bot` | `dry_run`, `campaign_name?` | `None` | Main execution pipeline |
+| `generate_reply` | `mention_text`, `author_username` | `str \| None` | Generates contextual reply for mention |
+| `run_bot` | `dry_run`, `campaign_name?` | `None` | Main post execution pipeline |
+| `run_mentions_bot` | `dry_run`, `limit` | `None` | Mentions processing pipeline |
 | `retry_api_call` | `func`, `max_retries`, `delay` | `Any` | Exponential backoff wrapper |
 | `add_campaign` | — | `None` | Interactive campaign creation |
 | `list_campaigns` | — | `None` | Prints campaign list |
@@ -274,6 +353,7 @@ The workflow accepts optional inputs:
 |---------|----------|---------|
 | Gemini | `generativelanguage.googleapis.com` | Text & image generation |
 | X API v2 | `api.twitter.com/2/tweets` | Tweet creation |
+| X API v2 | `api.twitter.com/2/users/:id/mentions` | Fetch mentions |
 | X API v1.1 | `upload.twitter.com/1.1/media/upload` | Media upload |
 | Supabase | `<project>.supabase.co/rest/v1` | Database operations |
 
@@ -300,6 +380,7 @@ Attempt 3 → Failure → Raise Exception
 ## Limitations
 
 - **Rate Limits**: X API allows 300 tweets per 3-hour window (user auth)
+- **Mentions Limit**: X API v2 free tier has limited mention access
 - **Character Limit**: Tweets truncated to 280 characters
 - **Image Generation**: May fail silently; bot continues with text-only post
 - **Single Campaign**: Scheduled runs execute one active campaign per invocation
@@ -316,7 +397,8 @@ xbot/
 ├── README.md
 └── .github/
     └── workflows/
-        └── daily_post.yml # CI/CD pipeline
+        ├── post.yml       # Scheduled posting
+        └── mentions.yml   # Scheduled mention replies
 ```
 
 ## License

@@ -7,8 +7,6 @@ import time
 import tweepy
 import google.generativeai as genai
 import io
-import requests
-import base64
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -173,7 +171,8 @@ def run_bot(dry_run=False, campaign_name: str = None):
                             f.write(image_bytes)
                         print("[DRY RUN] Saved generated image to 'dry_run_image.png'")
                 else:
-                    print(f"Model did not return image data. Response: {result.text[:100] if result.text else 'No text'}...")
+                    response_text = getattr(result, 'text', None)
+                    print(f"Model did not return image data. Response: {response_text[:100] if response_text else 'No text'}...")
 
             except Exception as img_err:
                 print(f"Image generation failed: {img_err}. Proceeding with text only.")
@@ -298,12 +297,198 @@ def toggle_campaign(campaign_id: int):
     """Toggle campaign active status."""
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     try:
-        current = supabase.table("campaigns").select("active").eq("id", campaign_id).single().execute()
-        new_status = not current.data['active']
+        response = supabase.table("campaigns").select("active").eq("id", campaign_id).execute()
+        if not response.data:
+            print(f"Campaign {campaign_id} not found.")
+            return
+        current_status = response.data[0]['active']
+        new_status = not current_status
         supabase.table("campaigns").update({"active": new_status}).eq("id", campaign_id).execute()
         print(f"Campaign {campaign_id} is now {'active' if new_status else 'inactive'}.")
     except Exception as e:
         print(f"Failed to toggle campaign: {e}")
+
+
+def generate_reply(mention_text: str, author_username: str) -> str:
+    """Generate a contextual reply using Gemini."""
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-2.5-flash')
+    
+    # Account for @username prefix in reply (username + @ + space)
+    max_reply_len = 280 - len(author_username) - 2
+    
+    prompt = f"""You are a helpful social media assistant. Someone mentioned you with this tweet:
+
+Author: @{author_username}
+Tweet: {mention_text}
+
+Write a friendly, helpful reply under {max_reply_len} characters. Be conversational and address their question or comment directly. Don't use hashtags unless relevant. Don't start with "Hey" or "Hi" every time - vary your openings."""
+
+    try:
+        response = retry_api_call(lambda: model.generate_content(prompt))
+        reply = response.text.strip()
+        
+        # Clean up any quotes the model might add
+        if reply.startswith('"') and reply.endswith('"'):
+            reply = reply[1:-1]
+        
+        if len(reply) > max_reply_len:
+            reply = reply[:max_reply_len - 3] + "..."
+        
+        return reply
+    except Exception as e:
+        print(f"Error generating reply: {e}")
+        return None
+
+
+def is_mention_processed(supabase: Client, mention_id: str) -> bool:
+    """Check if mention has already been processed."""
+    try:
+        response = supabase.table("mentions").select("id").eq("mention_id", mention_id).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        print(f"Error checking mention status: {e}")
+        # Return True on error to avoid duplicate replies
+        return True
+
+
+def run_mentions_bot(dry_run=False, limit=5):
+    """Fetch and reply to mentions."""
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    
+    print("Starting mentions bot...")
+    
+    # Authenticate
+    client = tweepy.Client(
+        consumer_key=X_API_KEY,
+        consumer_secret=X_API_SECRET,
+        access_token=X_ACCESS_TOKEN,
+        access_token_secret=X_ACCESS_TOKEN_SECRET,
+        wait_on_rate_limit=True
+    )
+    
+    try:
+        # Get authenticated user ID
+        me = client.get_me()
+        if not me.data:
+            print("Failed to get authenticated user.")
+            return
+        
+        user_id = me.data.id
+        username = me.data.username
+        print(f"Authenticated as @{username} (ID: {user_id})")
+        
+        # X API v2 requires max_results between 5-100
+        api_limit = max(5, min(limit, 100))
+        
+        # Fetch recent mentions
+        mentions = retry_api_call(lambda: client.get_users_mentions(
+            id=user_id,
+            max_results=api_limit,
+            tweet_fields=["created_at", "author_id", "conversation_id"],
+            expansions=["author_id"]
+        ))
+        
+        if not mentions.data:
+            print("No mentions found.")
+            return
+        
+        # Build author lookup
+        authors = {u.id: u.username for u in (mentions.includes.get('users', []) if mentions.includes else [])}
+        
+        processed = 0
+        for mention in mentions.data:
+            if processed >= limit:
+                break
+                
+            mention_id = str(mention.id)
+            author_id = mention.author_id
+            
+            # Skip self-mentions
+            if author_id == user_id:
+                print(f"Skipping self-mention: {mention_id}")
+                continue
+            
+            # Skip if already processed
+            if is_mention_processed(supabase, mention_id):
+                print(f"Skipping already processed mention: {mention_id}")
+                continue
+            
+            author_username = authors.get(author_id, "user")
+            mention_text = mention.text
+            
+            # Remove our @username from the text for cleaner context
+            clean_text = mention_text.replace(f"@{username}", "").strip()
+            
+            print(f"\nMention from @{author_username}: {clean_text[:50]}...")
+            
+            # Generate reply
+            reply_text = generate_reply(clean_text, author_username)
+            if not reply_text:
+                print("Failed to generate reply, skipping.")
+                continue
+            
+            print(f"Generated reply: {reply_text}")
+            
+            # Prepare full reply text
+            full_reply = f"@{author_username} {reply_text}"
+            
+            if dry_run:
+                print("[DRY RUN] Would reply to this mention.")
+                # Log to DB even in dry run to prevent reprocessing
+                try:
+                    supabase.table("mentions").insert({
+                        "mention_id": mention_id,
+                        "author_username": author_username,
+                        "mention_text": mention_text,
+                        "reply_text": reply_text,
+                        "reply_id": "DRY_RUN",
+                        "replied_at": datetime.now(timezone.utc).isoformat()
+                    }).execute()
+                except:
+                    pass
+                processed += 1
+            else:
+                try:
+                    # Post reply - use default args to capture current values
+                    def make_tweet(text=full_reply, reply_to=mention_id):
+                        return client.create_tweet(text=text, in_reply_to_tweet_id=reply_to)
+                    
+                    response = retry_api_call(make_tweet)
+                    reply_id = response.data['id']
+                    print(f"Replied! ID: {reply_id}")
+                    
+                    # Log to database
+                    supabase.table("mentions").insert({
+                        "mention_id": mention_id,
+                        "author_username": author_username,
+                        "mention_text": mention_text,
+                        "reply_text": reply_text,
+                        "reply_id": reply_id,
+                        "replied_at": datetime.now(timezone.utc).isoformat()
+                    }).execute()
+                    
+                    processed += 1
+                    
+                except Exception as reply_err:
+                    print(f"Failed to reply: {reply_err}")
+                    try:
+                        supabase.table("logs").insert({
+                            "message": f"Failed to reply to mention {mention_id}: {reply_err}",
+                            "level": "ERROR"
+                        }).execute()
+                    except:
+                        pass
+        
+        print(f"\nProcessed {processed} mentions.")
+        
+    except Exception as e:
+        error_msg = f"Mentions bot failed: {str(e)}"
+        print(error_msg)
+        try:
+            supabase.table("logs").insert({"message": error_msg, "level": "ERROR"}).execute()
+        except:
+            pass
 
 
 if __name__ == "__main__":
@@ -313,6 +498,8 @@ if __name__ == "__main__":
     parser.add_argument("--add", action="store_true", help="Add a new campaign")
     parser.add_argument("--list", action="store_true", help="List all campaigns")
     parser.add_argument("--toggle", type=int, help="Toggle campaign active status by ID")
+    parser.add_argument("--mentions", action="store_true", help="Process and reply to mentions")
+    parser.add_argument("--limit", type=int, default=5, help="Max mentions to process (default: 5)")
     args = parser.parse_args()
 
     if args.add:
@@ -321,6 +508,9 @@ if __name__ == "__main__":
         list_campaigns()
     elif args.toggle:
         toggle_campaign(args.toggle)
+    elif args.mentions:
+        limit = max(1, args.limit)  # Ensure at least 1
+        run_mentions_bot(dry_run=args.test, limit=limit)
     else:
         campaign_input = args.campaign
         if not campaign_input and sys.stdin.isatty():
