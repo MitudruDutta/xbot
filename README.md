@@ -40,14 +40,14 @@ XBot implements an end-to-end automated social media content pipeline consisting
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                │
 │  ┌──────────┐    ┌──────────────┐    ┌──────────────────────┐   │
-│  │ Supabase │───▶│   Campaign   │───▶│  Content Generation│  │
-│  │    DB    │    │   Selector   │    │   (Gemini 2.5 Flash) │  │
+│  │ Supabase │───▶│   Campaign   │───▶│ Content Generation │  │
+│  │    DB    │    │   Selector   │    │  (Gemini 2.5 Flash) │   │
 │  └──────────┘    └──────────────┘    └──────────┬───────────┘   │
 │       │                                         │              │
 │       │                                         ▼              │
 │       │                              ┌──────────────────────┐  │
 │       │                              │  Image Generation    │  │
-│       │                              │  (Gemini Image Model)│  │
+│       │                              │ (Gemini Image Model) │  │
 │       │                              └──────────┬───────────┘  │
 │       │                                         │              │
 │       │                                         ▼              │
