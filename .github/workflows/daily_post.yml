@@ -2,12 +2,23 @@ name: Daily Post
 
 on:
   schedule:
-    - cron: "0 9,18 * * *"
+    - cron: "0 9,18 * * *"  # 9 AM and 6 PM UTC
   workflow_dispatch:
+    inputs:
+      campaign:
+        description: 'Campaign name (optional)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run mode'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -16,12 +27,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-          cache: 'pip' # Enable caching for pip
+          python-version: "3.12"
+          cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run Bot
         env:
@@ -32,4 +42,12 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python bot.py
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.campaign }}" ]; then
+            ARGS="--campaign \"${{ inputs.campaign }}\""
+          fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --test"
+          fi
+          python bot.py $ARGS
