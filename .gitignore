@@ -1,2 +1,5 @@
 .env
 __pycache__/
+.github/
+.vscode/
+.DS_Store
